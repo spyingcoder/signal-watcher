@@ -31,13 +31,12 @@ STATE_FILE = "watcher_state.json"
 BAL_FILE = "balances.json"
 LOG_FILE = "signals.log"
 
-SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
+SYMBOLS = ["BTC", "ETH"]
 INTERVALS = ["1h", "4h"]
 PARAMS = {"enable_chop_filter": False, "max_lot": 1e9, "risk_percent": 1.0}
 
 DEFAULT_BALANCES = {"242005": 10000.0, "242006": 10000.0}
 API = f"https://api.telegram.org/bot{TOKEN}"
-KLINES = "https://api.binance.com/api/v3/klines"
 
 
 def load(path, fallback):
@@ -122,15 +121,70 @@ def handle_commands(state, balances):
     return changed
 
 
-def fetch(symbol: str, interval: str, limit: int = 400) -> pd.DataFrame:
-    r = requests.get(KLINES, params={"symbol": symbol, "interval": interval,
-                                     "limit": limit}, timeout=20)
+SECONDS = {"1h": 3600, "4h": 14400}
+
+
+def _frame(rows, cols):
+    df = pd.DataFrame(rows, columns=cols)
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]].astype(float)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+    return df.set_index("timestamp").sort_index()
+
+
+def _bitstamp(name, interval, limit):
+    pair = {"BTC": "btcusd", "ETH": "ethusd"}[name]
+    r = requests.get(f"https://www.bitstamp.net/api/v2/ohlc/{pair}/",
+                     params={"step": SECONDS[interval], "limit": limit},
+                     headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
     r.raise_for_status()
-    df = pd.DataFrame(r.json()).iloc[:, :6]
-    df.columns = ["timestamp", "open", "high", "low", "close", "volume"]
-    df = df.astype(float)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    return df.set_index("timestamp").sort_index().iloc[:-1]
+    return _frame(r.json()["data"]["ohlc"],
+                  ["timestamp", "open", "high", "low", "close", "volume"])
+
+
+def _coinbase(name, interval, limit):
+    prod = {"BTC": "BTC-USD", "ETH": "ETH-USD"}[name]
+    r = requests.get(f"https://api.exchange.coinbase.com/products/{prod}/candles",
+                     params={"granularity": SECONDS[interval]},
+                     headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    r.raise_for_status()
+    rows = r.json()          # [time, low, high, open, close, volume]
+    df = pd.DataFrame(rows, columns=["timestamp", "low", "high", "open", "close", "volume"])
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]].astype(float)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+    return df.set_index("timestamp").sort_index()
+
+
+def _kraken(name, interval, limit):
+    pair = {"BTC": "XBTUSD", "ETH": "ETHUSD"}[name]
+    r = requests.get("https://api.kraken.com/0/public/OHLC",
+                     params={"pair": pair, "interval": SECONDS[interval] // 60},
+                     headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    r.raise_for_status()
+    res = r.json()["result"]
+    key = [k for k in res if k != "last"][0]
+    df = pd.DataFrame(res[key], columns=["timestamp", "open", "high", "low",
+                                         "close", "vwap", "volume", "count"])
+    df = df[["timestamp", "open", "high", "low", "close", "volume"]].astype(float)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+    return df.set_index("timestamp").sort_index()
+
+
+SOURCES = [("bitstamp", _bitstamp), ("coinbase", _coinbase), ("kraken", _kraken)]
+
+
+def fetch(name: str, interval: str, limit: int = 300) -> pd.DataFrame:
+    """Try each exchange in turn; first one that answers wins."""
+    errors = []
+    for label, fn in SOURCES:
+        try:
+            df = fn(name, interval, limit)
+            if len(df) < 60:
+                raise ValueError(f"only {len(df)} bars")
+            print(f"  {name} {interval}: {label} ({len(df)} bars)")
+            return df.iloc[:-1]          # drop the still-forming bar
+        except Exception as e:
+            errors.append(f"{label}: {type(e).__name__}")
+    raise RuntimeError("all sources failed — " + ", ".join(errors))
 
 
 def signal(df: pd.DataFrame, p: dict):
@@ -175,11 +229,11 @@ def main():
     handle_commands(state, balances)
 
     fired = []
-    for name, sym in SYMBOLS.items():
+    for name in SYMBOLS:
         for iv in INTERVALS:
             key = f"{name}_{iv}"
             try:
-                s = signal(fetch(sym, iv), p)
+                s = signal(fetch(name, iv), p)
             except Exception as e:
                 print(f"{key}: {type(e).__name__}: {e}")
                 continue
