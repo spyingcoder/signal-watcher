@@ -30,10 +30,10 @@ jobs:
 
       - name: save state
         run: |
-          if [[ -n "$(git status --porcelain watcher_state.json signals.log)" ]]; then
+          if [[ -n "$(git status --porcelain watcher_state.json balances.json signals.log)" ]]; then
             git config user.name  "signal-watcher"
             git config user.email "watcher@users.noreply.github.com"
-            git add watcher_state.json signals.log
+            git add watcher_state.json balances.json signals.log
             git commit -m "signal state $(date -u +%Y-%m-%dT%H:%M)"
             git push
           fi
