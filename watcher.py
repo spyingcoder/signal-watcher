@@ -188,22 +188,35 @@ def fetch(name: str, interval: str, limit: int = 300) -> pd.DataFrame:
 
 
 def signal(df: pd.DataFrame, p: dict):
+    """Mirror the Pine/backtest logic exactly: activeDirection persists, so a
+    new BUY can only fire after a SELL condition has flipped the state, and
+    vice versa. Walking the whole series is the only faithful way to do it."""
     d = prepare(df, p)
-    i = len(d) - 1
-    if i < 2:
+    n = len(d)
+    if n < 3:
         return None
 
-    def state_at(k):
-        c = d["close"].iloc[k]
-        if d["asgma_bull"].iloc[k] and c > d["vwap"].iloc[k] and c > d["supertrend"].iloc[k]:
-            return 1
-        if (not d["asgma_bull"].iloc[k]) and c < d["vwap"].iloc[k] and c < d["supertrend"].iloc[k]:
-            return -1
-        return 0
+    close = d["close"].to_numpy()
+    bull = d["asgma_bull"].to_numpy()
+    vwap = d["vwap"].to_numpy()
+    st = d["supertrend"].to_numpy()
 
-    now, prev = state_at(i), state_at(i - 1)
-    if now == 0 or now == prev:
-        return None
+    active = 0
+    last_fire = None          # (index, direction)
+    for k in range(n):
+        c = close[k]
+        up = bull[k] and c > vwap[k] and c > st[k]
+        dn = (not bull[k]) and c < vwap[k] and c < st[k]
+        if up and active != 1:
+            active = 1
+            last_fire = (k, 1)
+        elif dn and active != -1:
+            active = -1
+            last_fire = (k, -1)
+
+    if last_fire is None or last_fire[0] != n - 1:
+        return None           # the newest bar did not fire
+    i, now = last_fire
 
     c = d["close"].iloc[i]
     atr = d["atr"].iloc[i]
